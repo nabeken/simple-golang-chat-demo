@@ -24,6 +24,10 @@
 #   go-tests = true
 #   unused-packages = true
 
+[metadata.heroku]
+  root-package = "github.com/nabeken/simple-golang-chat-demo"
+  go-version = "1.10"
+  ensure = true
 
 [[constraint]]
   name = "github.com/gorilla/websocket"
