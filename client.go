@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -37,6 +38,15 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
+// Message is a message the client handles on the websocket connection in JSON.
+type Message struct {
+	User string `json:"user"`
+	Body string `json:"body"`
+
+	// Timestamp is the number of milliseconds since 1 January 1970 UTC.
+	Timestamp int64 `json:"timestamp"`
+}
+
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
 	hub *Hub
@@ -46,6 +56,9 @@ type Client struct {
 
 	// Buffered channel of outbound messages.
 	send chan []byte
+
+	// The user who owns this connection.
+	user string
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -67,6 +80,25 @@ func (c *Client) readPump() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
+			break
+		}
+
+		msg := &Message{}
+		if err := json.Unmarshal(message, msg); err != nil {
+			log.Printf("error: %v", err)
+			break
+		}
+
+		if msg.User == "" {
+			log.Print("no user name found")
+			break
+		}
+		if c.user == "" {
+			c.user = msg.User
+			c.hub.join <- c
+		}
+		if c.user != msg.User {
+			log.Print("user name does not match. Who are you?")
 			break
 		}
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
