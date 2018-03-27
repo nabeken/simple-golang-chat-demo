@@ -4,10 +4,7 @@
 
 package main
 
-import (
-	"encoding/json"
-	"log"
-)
+import "log"
 
 // hub maintains the set of active clients and broadcasts messages to the
 // clients.
@@ -23,9 +20,6 @@ type Hub struct {
 
 	// Unregister requests from clients.
 	unregister chan *Client
-
-	// Join requests from clients.
-	join chan *Client
 }
 
 func newHub() *Hub {
@@ -33,7 +27,6 @@ func newHub() *Hub {
 		broadcast:  make(chan []byte),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		join:       make(chan *Client),
 		clients:    make(map[*Client]bool),
 	}
 }
@@ -43,23 +36,14 @@ func (h *Hub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-		case client := <-h.join:
-			log.Printf("user `%s` joined", client.user)
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
-			log.Printf("user `%s` was disconnected", client.user)
 		case message := <-h.broadcast:
-			msg := &Message{}
-			if err := json.Unmarshal(message, msg); err != nil {
-				log.Printf("error: %v", err)
-				continue
-			}
-			if len(msg.Body) == 0 {
-				continue
-			}
+			log.Println("MESSAGE:", string(message))
+
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -70,15 +54,4 @@ func (h *Hub) run() {
 			}
 		}
 	}
-}
-
-func (h *Hub) getActiveUsers() []string {
-	users := []string{}
-	for c := range h.clients {
-		if c.user == "" {
-			continue
-		}
-		users = append(users, c.user)
-	}
-	return users
 }
