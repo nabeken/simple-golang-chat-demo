@@ -116,7 +116,17 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 			})
 		}
 
-		// TODO: let others in the same channel know the changes
+		for _, mc := range h.lookupClientsByChannelsByPrefix(c.prefix) {
+			err := h.writeMessage(mc, &Message{
+				Prefix:  prevPrefix,
+				Command: msg.Command,
+				Params:  msg.Params,
+			})
+			if err != nil {
+				log.Printf("failed to send NICK command to %s: %s", mc.prefix, err)
+			}
+		}
+
 		return nil
 	}
 
@@ -225,6 +235,26 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 			Params:  fmt.Sprintf("%s :Unknown command", msg.Command),
 		})
 	}
+}
+
+func (h *Hub) lookupClientsByChannelsByPrefix(prefix string) []*Client {
+	prefixes := map[*Client]struct{}{}
+	for _, ch := range h.channels {
+		if ch.IsMember(prefix) {
+			for mc := range ch.Members {
+				if mc.prefix == prefix {
+					// ignore myself
+					continue
+				}
+				prefixes[mc] = struct{}{}
+			}
+		}
+	}
+	var ret []*Client
+	for mc := range prefixes {
+		ret = append(ret, mc)
+	}
+	return ret
 }
 
 func (h *Hub) writeMessage(c *Client, message *Message) error {
