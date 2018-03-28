@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -19,18 +20,28 @@ const serverName = "simple-go-chat-demo.herokuapp.com"
 type Channel struct {
 	Members map[*Client]struct{}
 	Topic   string
+	Hub     *Hub
 }
 
-func (c *Channel) ListMembers() []string {
+func (ch *Channel) Broadcast(message *Message) {
+	for c := range ch.Members {
+		if err := ch.Hub.writeMessage(c, message); err != nil {
+			log.Printf("failed to broadcast to %s: %s", c.prefix, err)
+		}
+	}
+}
+
+func (ch *Channel) ListMembers() []string {
 	var members []string
-	for c := range c.Members {
+	for c := range ch.Members {
 		members = append(members, c.prefix)
 	}
+	sort.Strings(members)
 	return members
 }
 
-func (c *Channel) IsMember(prefix string) bool {
-	for c := range c.Members {
+func (ch *Channel) IsMember(prefix string) bool {
+	for c := range ch.Members {
 		if c.prefix == prefix {
 			return true
 		}
@@ -128,6 +139,7 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 				Members: map[*Client]struct{}{
 					c: struct{}{},
 				},
+				Hub: h,
 			}
 			h.channels[msg.Params] = ch
 		}
@@ -141,11 +153,11 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 		ch.Members[c] = struct{}{}
 
 		// Let others and the sender (for confirmation) in the channel know new join
-		h.broadcast <- &Message{
+		ch.Broadcast(&Message{
 			Prefix:  c.prefix,
 			Command: msg.Command,
 			Params:  msg.Params,
-		}
+		})
 
 		// Send the members in the channel including this prefix
 		return h.writeMessage(c, &Message{
@@ -155,7 +167,47 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 		})
 
 	case "PRIVMSG":
-		return nil
+		ret := strings.SplitN(msg.Params, " ", 2)
+		if len(ret) != 2 {
+			return h.writeMessage(c, &Message{
+				Prefix:  serverName,
+				Command: "ERR_NOTEXTTOSEND",
+				Params:  "No text to send",
+			})
+		}
+
+		msg_ := &Message{
+			Prefix:  c.prefix,
+			Command: msg.Command,
+			Params:  msg.Params,
+		}
+
+		if strings.HasPrefix(ret[0], "#") {
+			// to channel
+			ch, found := h.channels[ret[0]]
+			if !found {
+				h.writeMessage(c, &Message{
+					Prefix:  serverName,
+					Command: "ERR_NOSUCHCHANNEL",
+					Params:  "No such channel",
+				})
+			}
+
+			ch.Broadcast(msg_)
+			return nil
+		}
+
+		for c_ := range h.clients {
+			if c_.prefix == ret[0] {
+				return h.writeMessage(c_, msg_)
+			}
+		}
+
+		return h.writeMessage(c, &Message{
+			Prefix:  serverName,
+			Command: "ERR_NOSUCHNICK",
+			Params:  fmt.Sprintf("%s No such nick/channel", msg.Params),
+		})
 
 	case "PART":
 		return nil
