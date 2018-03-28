@@ -81,7 +81,9 @@ func (c *Client) readPump() {
 		}
 
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.hub.broadcast <- message
+		if err := c.hub.handleCommand(c, message); err != nil {
+			break
+		}
 	}
 }
 
