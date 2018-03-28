@@ -5,7 +5,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -33,10 +32,6 @@ func main() {
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
-	})
-	http.HandleFunc("/active_users", func(w http.ResponseWriter, r *http.Request) {
-		users := hub.getActiveUsers()
-		json.NewEncoder(w).Encode(users)
 	})
 
 	log.Println("Listening to", *addr)

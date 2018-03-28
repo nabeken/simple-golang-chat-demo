@@ -5,7 +5,8 @@
 <script type="text/javascript">
 window.onload = function () {
     var conn;
-    var msg = document.getElementById("msg");
+    var command = document.getElementById("command");
+    var params = document.getElementById("params");
     var log = document.getElementById("log");
 
     function appendLog(item) {
@@ -20,11 +21,19 @@ window.onload = function () {
         if (!conn) {
             return false;
         }
-        if (!msg.value) {
+        if (!command.value) {
             return false;
         }
-        conn.send(msg.value);
-        msg.value = "";
+        if (!params.value) {
+            return false;
+        }
+        msg = {
+          "command": command.value,
+          "params": params.value
+        };
+        conn.send(JSON.stringify(msg));
+        command.value = "";
+        params.value = "";
         return false;
     };
 
@@ -92,7 +101,8 @@ body {
 <div id="log"></div>
 <form id="form">
     <input type="submit" value="Send" />
-    <input type="text" id="msg" size="64"/>
+    <input type="text" id="command" size="64"/>
+    <input type="text" id="params" size="64"/>
 </form>
 </body>
 </html>
