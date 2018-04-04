@@ -65,7 +65,7 @@ type Client struct {
 // reads from this goroutine.
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		c.hub.unregister <- &clientMessage{c, nil}
 		c.conn.Close()
 	}()
 	c.conn.SetReadLimit(maxMessageSize)
@@ -81,9 +81,7 @@ func (c *Client) readPump() {
 		}
 
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		if err := c.hub.handleCommand(c, message); err != nil {
-			break
-		}
+		c.hub.command <- &cmessage{c, message}
 	}
 }
 

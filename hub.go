@@ -10,6 +10,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
 )
@@ -21,9 +22,13 @@ type Channel struct {
 	Members map[*Client]struct{}
 	Topic   string
 	Hub     *Hub
+
+	mu sync.Mutex
 }
 
 func (ch *Channel) Broadcast(message *Message) {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
 	for c := range ch.Members {
 		if err := ch.Hub.writeMessage(c, message); err != nil {
 			log.Printf("failed to broadcast to %s: %s", c.prefix, err)
@@ -32,6 +37,9 @@ func (ch *Channel) Broadcast(message *Message) {
 }
 
 func (ch *Channel) ListMembers() []string {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+
 	var members []string
 	for c := range ch.Members {
 		members = append(members, c.prefix)
@@ -41,6 +49,9 @@ func (ch *Channel) ListMembers() []string {
 }
 
 func (ch *Channel) IsMember(prefix string) bool {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+
 	for c := range ch.Members {
 		if c.prefix == prefix {
 			return true
@@ -55,24 +66,28 @@ type Hub struct {
 	// Registered clients.
 	clients map[*Client]struct{}
 
-	// Inbound messages from the clients.
+	// channels in the hub
+	channels map[string]*Channel
+
+	// Outbound messages to the clients.
 	broadcast chan *Message
+
+	// Inbound messages from the clients.
+	command chan *cmessage
 
 	// Register requests from the clients.
 	register chan *Client
 
 	// Unregister requests from clients.
-	unregister chan *Client
-
-	// channels in the hub
-	channels map[string]*Channel
+	unregister chan *clientMessage
 }
 
 func newHub() *Hub {
 	return &Hub{
 		broadcast:  make(chan *Message),
 		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		unregister: make(chan *clientMessage),
+		command:    make(chan *cmessage),
 		clients:    make(map[*Client]struct{}),
 		channels:   make(map[string]*Channel),
 	}
@@ -87,9 +102,43 @@ func (h *Hub) nickExists(nick string) bool {
 	return false
 }
 
-func (h *Hub) handleCommand(c *Client, message []byte) error {
+func (h *Hub) lookupClientsByChannelsByPrefix(prefix string) []*Client {
+	prefixes := map[*Client]struct{}{}
+	for _, ch := range h.channels {
+		if ch.IsMember(prefix) {
+			for mc := range ch.Members {
+				if mc.prefix == prefix {
+					// ignore myself
+					continue
+				}
+				prefixes[mc] = struct{}{}
+			}
+		}
+	}
+	var ret []*Client
+	for mc := range prefixes {
+		ret = append(ret, mc)
+	}
+	return ret
+}
+
+func (h *Hub) writeMessage(c *Client, message *Message) error {
+	data, err := json.Marshal(message)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal into JSON")
+	}
+
+	select {
+	case c.send <- data:
+		return nil
+	default:
+		return errors.New("no data sent")
+	}
+}
+
+func (h *Hub) handleCommand(c *Client, m []byte) error {
 	msg := &Message{}
-	if err := json.Unmarshal(message, msg); err != nil {
+	if err := json.Unmarshal(m, msg); err != nil {
 		return err
 	}
 
@@ -173,7 +222,7 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 		return h.writeMessage(c, &Message{
 			Prefix:  serverName,
 			Command: "RPL_NAMREPLY",
-			Params:  strings.Join(ch.ListMembers(), " "),
+			Params:  fmt.Sprintf("%s %s", msg.Params, strings.Join(ch.ListMembers(), " ")),
 		})
 
 	case "PRIVMSG":
@@ -220,9 +269,43 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 		})
 
 	case "PART":
+		ret := strings.SplitN(msg.Params, " ", 2)
+		ch, found := h.channels[ret[0]]
+		if !found {
+			return h.writeMessage(c, &Message{
+				Prefix:  serverName,
+				Command: "ERR_NOSUCHCHANNEL",
+				Params:  "No such channel",
+			})
+		}
+		delete(ch.Members, c)
+
+		if len(ch.Members) == 0 {
+			// remove the channel
+			delete(h.channels, ret[0])
+			log.Printf("channel %s has been closed", ret[0])
+		}
+
+		// Let others in the channel knows quit
+		ch.Broadcast(&Message{
+			Prefix:  c.prefix,
+			Command: msg.Command,
+			Params:  msg.Params,
+		})
+
 		return nil
 
 	case "QUIT":
+		// collect clients in the same chanels with this prefix
+		// send ERROR message and close the conn
+		h.writeMessage(c, &Message{
+			Prefix:  serverName,
+			Command: "ERROR",
+			Params:  "the connection is being terminated",
+		})
+
+		h.unregister <- &clientMessage{c, msg}
+
 		return nil
 
 	case "PONG":
@@ -237,62 +320,86 @@ func (h *Hub) handleCommand(c *Client, message []byte) error {
 	}
 }
 
-func (h *Hub) lookupClientsByChannelsByPrefix(prefix string) []*Client {
-	prefixes := map[*Client]struct{}{}
-	for _, ch := range h.channels {
-		if ch.IsMember(prefix) {
-			for mc := range ch.Members {
-				if mc.prefix == prefix {
-					// ignore myself
-					continue
-				}
-				prefixes[mc] = struct{}{}
+func (h *Hub) processBroadcast() {
+	for {
+		message := <-h.broadcast
+		log.Printf("BROADCAST MESSAGE: %+v", message)
+
+		for client := range h.clients {
+			if client.prefix == "" {
+				continue
+			}
+			if err := h.writeMessage(client, message); err != nil {
+				close(client.send)
+				delete(h.clients, client)
 			}
 		}
 	}
-	var ret []*Client
-	for mc := range prefixes {
-		ret = append(ret, mc)
-	}
-	return ret
 }
 
-func (h *Hub) writeMessage(c *Client, message *Message) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal into JSON")
-	}
+type clientMessage struct {
+	c *Client
+	m *Message
+}
 
-	select {
-	case c.send <- data:
-		return nil
-	default:
-		return errors.New("no data sent")
+type cmessage struct {
+	c *Client
+	m []byte
+}
+
+func (h *Hub) processCommand() {
+	for {
+		m_ := <-h.command
+		if err := h.handleCommand(m_.c, m_.m); err != nil {
+			log.Printf("failed to handle command: %+v", err)
+		}
 	}
 }
 
-func (h *Hub) run() {
+func (h *Hub) processRegistration() {
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = struct{}{}
-		case client := <-h.unregister:
+		case clientMessage := <-h.unregister:
+			client, msg := clientMessage.c, clientMessage.m
 			if _, ok := h.clients[client]; ok {
+				for _, mc := range h.lookupClientsByChannelsByPrefix(client.prefix) {
+					if msg == nil {
+						msg = &Message{
+							Prefix:  client.prefix,
+							Command: "QUIT",
+							Params:  "disconnected",
+						}
+					}
+					err := h.writeMessage(mc, &Message{
+						Prefix:  client.prefix,
+						Command: msg.Command,
+						Params:  msg.Params,
+					})
+					if err != nil {
+						log.Printf("failed to send QUIT command to %s: %s", mc.prefix, err)
+					}
+				}
+
+				// remove the client from channels
+				for _, ch := range h.channels {
+					if ch.IsMember(client.prefix) {
+						delete(ch.Members, client)
+					}
+				}
+
 				delete(h.clients, client)
 				close(client.send)
-			}
-		case message := <-h.broadcast:
-			log.Printf("BROADCAST MESSAGE: %+v", message)
 
-			for client := range h.clients {
-				if client.prefix == "" {
-					continue
-				}
-				if err := h.writeMessage(client, message); err != nil {
-					close(client.send)
-					delete(h.clients, client)
-				}
+				log.Printf("%s disconnected", client.prefix)
 			}
 		}
 	}
+}
+
+func (h *Hub) run() {
+	go h.processBroadcast()
+	go h.processRegistration()
+	go h.processCommand()
 }
