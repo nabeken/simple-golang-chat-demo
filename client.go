@@ -35,6 +35,10 @@ var (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	// I KNOW WHAT I'M DOING. THIS IS FOR TESTING.
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 // Message is a message the client handles on the websocket connection in JSON.
